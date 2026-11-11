@@ -1,0 +1,154 @@
+name: Release nightly
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-nightly
+  cancel-in-progress: true
+
+env:
+  RELEASE_ASSET: mocker.tar.gz
+  XCODE_VERSION: "26.6"
+  CODESIGN_IDENTIFIER: com.seruman.mocker
+
+jobs:
+  build-and-release:
+    runs-on: macos-26
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: ${{ env.XCODE_VERSION }}
+
+      - name: Show tool versions
+        id: swift
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          swift --version
+          echo "hash=$(swift --version 2>&1 | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache build
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: release-${{ runner.os }}-${{ steps.swift.outputs.hash }}-${{ hashFiles('Package.resolved') }}-${{ github.sha }}
+          restore-keys: |
+            release-${{ runner.os }}-${{ steps.swift.outputs.hash }}-${{ hashFiles('Package.resolved') }}-
+            release-${{ runner.os }}-${{ steps.swift.outputs.hash }}-
+
+      - name: Build release binary
+        run: |
+          set -euo pipefail
+          swift build -c release --product mocker --disable-automatic-resolution
+          mkdir -p "$RUNNER_TEMP/dist"
+          install -m 755 .build/release/mocker "$RUNNER_TEMP/dist/mocker"
+          strip "$RUNNER_TEMP/dist/mocker"
+
+      - name: Sign binary
+        env:
+          CODESIGN_CERT_P12_BASE64: ${{ secrets.CODESIGN_CERT_P12_BASE64 }}
+          CODESIGN_CERT_PASSWORD: ${{ secrets.CODESIGN_CERT_PASSWORD }}
+          CODESIGN_CERT_NAME: Teteye CI Code Signing
+        run: |
+          set -euo pipefail
+          if [[ -z "${CODESIGN_CERT_P12_BASE64:-}" || -z "${CODESIGN_CERT_PASSWORD:-}" ]]; then
+            echo "Missing code-signing secrets"
+            exit 1
+          fi
+
+          keychain_password="$(openssl rand -base64 32)"
+          keychain_path="$RUNNER_TEMP/mocker-signing.keychain-db"
+          p12_path="$RUNNER_TEMP/mocker-codesign.p12"
+          binary="$RUNNER_TEMP/dist/mocker"
+
+          printf '%s' "$CODESIGN_CERT_P12_BASE64" | base64 --decode > "$p12_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$p12_path" \
+            -P "$CODESIGN_CERT_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$keychain_path"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path"
+
+          codesign \
+            --verbose \
+            --force \
+            --timestamp=none \
+            --options runtime \
+            --identifier "$CODESIGN_IDENTIFIER" \
+            --sign "$CODESIGN_CERT_NAME" \
+            "$binary"
+          codesign --verify --strict --verbose=2 "$binary"
+          codesign -dr - "$binary"
+
+      - name: Package
+        id: package
+        run: |
+          set -euo pipefail
+          tag="nightly-$(date -u +%Y-%m-%d)-${GITHUB_SHA::7}"
+
+          rm -f "$RELEASE_ASSET"
+          tar -czf "$RELEASE_ASSET" -C "$RUNNER_TEMP/dist" mocker
+          tar -tzf "$RELEASE_ASSET" | grep -qx mocker
+
+          hash="sha256-$(openssl dgst -sha256 -binary "$RELEASE_ASSET" | base64)"
+
+          {
+            echo "tag=$tag"
+            echo "hash=$hash"
+            echo "asset_path=$PWD/$RELEASE_ASSET"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.package.outputs.tag }}
+          HASH: ${{ steps.package.outputs.hash }}
+          ASSET_PATH: ${{ steps.package.outputs.asset_path }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists"
+            exit 1
+          fi
+
+          notes="Automated nightly build from ${GITHUB_SHA}.
+
+          \`\`\`
+          version = \"${TAG}\";
+          hash = \"${HASH}\";
+          \`\`\`"
+
+          gh release create "$TAG" "$ASSET_PATH" \
+            --title "$TAG" \
+            --notes "$notes" \
+            --prerelease \
+            --target "$GITHUB_SHA"
+
+          {
+            echo "### $TAG"
+            echo
+            echo '```'
+            echo "version = \"${TAG}\";"
+            echo "hash = \"${HASH}\";"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
