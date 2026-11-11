@@ -157,6 +157,33 @@ mocker build --platform linux/amd64 --platform linux/arm64 -t myapp:latest .
 mocker push my-registry.io/myapp:latest
 ```
 
+### Registry Credentials
+
+Pull and push find a registry's credentials in this order:
+
+1. The credential helper set for the registry in `~/.mocker/config.json`, if any.
+2. The login saved by `mocker login`.
+
+Credential helpers are set as in Docker's `config.json`, by registry host:
+
+```json
+{
+  "credHelpers": {
+    "registry.example.com": "example"
+  }
+}
+```
+
+mocker runs `docker-credential-<name> get` from `PATH`, so Docker's helpers work as-is.
+A registry with a helper uses only that helper: when the helper has no credentials, the
+request goes without them, and when it fails, the pull or push fails. Keys are read the
+way `mocker login` takes a server, so `docker.io`, `index.docker.io` and
+`https://index.docker.io/v1/` all mean Docker Hub.
+
+`mocker build` runs `container build`, which pulls base images with the `container`
+CLI's own logins, not mocker's. To build from a private base image, `mocker pull` it
+first or log in with `container registry login`.
+
 ### Manifest Lists (multi-arch images)
 
 ```bash
@@ -437,7 +464,7 @@ approach gives you a fully working Docker-compatible tool on macOS 26 today:
 - [x] `mocker build` — delegates to `container build` with live output
 - [x] `mocker stats` — real CPU% and memory from VM process
 - [x] Port mapping (`-p`) — userspace TCP proxy subprocess
-- [x] Registry authentication (`mocker login` / `mocker logout`, keychain-backed; Amazon ECR tokens from the AWS CLI)
+- [x] Registry authentication (`mocker login` / `mocker logout`, keychain-backed; Docker credential helpers)
 - [ ] `mocker compose --scale`
 - [ ] MenuBar live container metrics (CPU, memory, logs)
 - [ ] Image layer size reporting

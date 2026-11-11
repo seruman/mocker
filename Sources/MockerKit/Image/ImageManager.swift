@@ -29,7 +29,7 @@ public actor ImageManager {
             return (await Self.toImageInfo(existing), true)
         }
 
-        let auth = await RegistryAuth.resolve(for: normalized)
+        let auth = try await RegistryAuth.resolve(for: normalized)
         let image = try await imageStore.pull(reference: normalized, platform: parsedPlatform, auth: auth)
         return (await Self.toImageInfo(image), false)
     }
@@ -543,7 +543,7 @@ public actor ImageManager {
             _ = try await imageStore.tag(existing: image.reference, new: normalized)
         }
         let parsedPlatform = try platform.map { try ContainerizationOCI.Platform(from: $0) }
-        let auth = await RegistryAuth.resolve(for: normalized)
+        let auth = try await RegistryAuth.resolve(for: normalized)
         try await imageStore.push(reference: normalized, platform: parsedPlatform, auth: auth)
     }
 

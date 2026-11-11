@@ -8,7 +8,8 @@ import ContainerizationExtras
 /// manage entries here, and pull/push look them up automatically. This is separate
 /// from Apple's `container` CLI keychain, because mocker pulls images through the
 /// Containerization framework directly rather than shelling out to `container pull`.
-/// Amazon ECR registries get a fresh token from the AWS CLI first (see `ECRAuth`).
+/// A host with a credential helper in `~/.mocker/config.json` uses only that helper
+/// (see `CredentialHelper`).
 public enum RegistryAuth {
     /// Keychain security domain that scopes all mocker registry credentials.
     static let securityDomain = "com.mocker.cli"
@@ -19,11 +20,17 @@ public enum RegistryAuth {
 
     /// Stored credentials for the registry hosting `reference`, or nil for anonymous access.
     /// `reference` should be a fully-qualified image reference (see `ImageManager.normalize`).
-    public static func resolve(for reference: String) async -> Authentication? {
+    /// Throws when the host's credential helper fails.
+    public static func resolve(for reference: String) async throws -> Authentication? {
         guard let host = try? Reference.parse(reference).resolvedDomain else { return nil }
 
-        if let ecr = await ECRAuth.authentication(for: host) {
-            return ecr
+        switch try await CredentialHelper.authentication(for: host) {
+        case .credentials(let username, let secret):
+            return BasicAuthentication(username: username, password: secret)
+        case .anonymous:
+            return nil
+        case .notConfigured:
+            break
         }
 
         return try? keychain.lookup(hostname: host)
